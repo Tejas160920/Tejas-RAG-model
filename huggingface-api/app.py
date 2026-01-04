@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import pdfplumber
@@ -7,7 +8,11 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 from langchain_groq import ChatGroq
+from functools import lru_cache
+import hashlib
+import asyncio
 import os
+import time
 
 # Initialize FastAPI app
 app = FastAPI(title="Tejas Portfolio RAG API")
@@ -15,7 +20,7 @@ app = FastAPI(title="Tejas Portfolio RAG API")
 # Enable CORS for your portfolio website
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your actual domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,7 +28,7 @@ app.add_middleware(
 
 # Request/Response models
 class Message(BaseModel):
-    role: str  # "user" or "assistant"
+    role: str
     content: str
 
 class QueryRequest(BaseModel):
@@ -41,6 +46,60 @@ document_keys = []
 document_texts = []
 llm = None
 
+# ============================================
+# CACHING LAYER - Speeds up repeated queries
+# ============================================
+query_cache = {}  # Cache for full responses
+embedding_cache = {}  # Cache for query embeddings
+CACHE_TTL = 3600  # Cache for 1 hour
+
+def normalize_query(query: str) -> str:
+    """Normalize query for better cache hits"""
+    return query.lower().strip()
+
+def get_cache_key(query: str, history_len: int) -> str:
+    """Generate cache key from query and history length"""
+    normalized = normalize_query(query)
+    return hashlib.md5(f"{normalized}:{history_len}".encode()).hexdigest()
+
+def get_cached_response(cache_key: str) -> Optional[str]:
+    """Get cached response if exists and not expired"""
+    if cache_key in query_cache:
+        cached, timestamp = query_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return cached
+        del query_cache[cache_key]
+    return None
+
+def set_cached_response(cache_key: str, response: str):
+    """Cache a response"""
+    # Keep cache size manageable (max 100 entries)
+    if len(query_cache) > 100:
+        oldest_key = min(query_cache.keys(), key=lambda k: query_cache[k][1])
+        del query_cache[oldest_key]
+    query_cache[cache_key] = (response, time.time())
+
+def get_cached_embedding(query: str):
+    """Get cached embedding for query"""
+    normalized = normalize_query(query)
+    if normalized in embedding_cache:
+        emb, timestamp = embedding_cache[normalized]
+        if time.time() - timestamp < CACHE_TTL:
+            return emb
+        del embedding_cache[normalized]
+    return None
+
+def set_cached_embedding(query: str, embedding):
+    """Cache query embedding"""
+    normalized = normalize_query(query)
+    if len(embedding_cache) > 200:
+        oldest_key = min(embedding_cache.keys(), key=lambda k: embedding_cache[k][1])
+        del embedding_cache[oldest_key]
+    embedding_cache[normalized] = (embedding, time.time())
+
+# ============================================
+# PDF & TEXT PROCESSING
+# ============================================
 def load_pdf_text(pdf_path):
     """Extract text from PDF"""
     pdf_text = ""
@@ -63,11 +122,26 @@ def structure_text(text):
             documents[title] = content
     return documents
 
-def build_prompt(query, history=[], top_k=5):
-    """Build the RAG prompt with retrieved context and conversation history"""
-    global embedder, index, document_keys, document_texts
+# ============================================
+# RAG RETRIEVAL WITH CACHING
+# ============================================
+def get_query_embedding(query: str):
+    """Get embedding with caching"""
+    global embedder
 
-    query_embedding = embedder.encode(query, convert_to_numpy=True)
+    cached = get_cached_embedding(query)
+    if cached is not None:
+        return cached
+
+    embedding = embedder.encode(query, convert_to_numpy=True)
+    set_cached_embedding(query, embedding)
+    return embedding
+
+def retrieve_context(query: str, top_k: int = 5) -> str:
+    """Retrieve relevant context from FAISS index"""
+    global index, document_keys, document_texts
+
+    query_embedding = get_query_embedding(query)
     distances, indices = index.search(np.array([query_embedding]), top_k)
 
     retrieved_sections = [document_keys[i] + ":\n" + document_texts[i] for i in indices[0]]
@@ -77,10 +151,13 @@ def build_prompt(query, history=[], top_k=5):
     if len(context) > MAX_CONTEXT_LENGTH:
         context = context[:MAX_CONTEXT_LENGTH]
 
-    # Build conversation history string (last 6 messages max)
+    return context
+
+def build_prompt(query: str, context: str, history: List[Message] = []) -> str:
+    """Build the RAG prompt"""
     history_str = ""
     if history:
-        recent_history = history[-6:]  # Keep last 6 messages for context
+        recent_history = history[-6:]
         for msg in recent_history:
             role = "User" if msg.role == "user" else "Assistant"
             history_str += f"{role}: {msg.content}\n"
@@ -126,6 +203,9 @@ CURRENT QUESTION: {query}
 ANSWER:"""
     return prompt
 
+# ============================================
+# STARTUP
+# ============================================
 @app.on_event("startup")
 async def startup_event():
     """Initialize RAG components on startup"""
@@ -133,24 +213,22 @@ async def startup_event():
 
     print("Loading RAG components...")
 
-    # Initialize Groq LLM - API key must be set as environment variable in HuggingFace Spaces
     groq_api_key = os.environ.get("GROQ_API_KEY")
     if not groq_api_key:
         raise ValueError("GROQ_API_KEY environment variable is not set!")
+
     llm = ChatGroq(
         temperature=0.3,
         groq_api_key=groq_api_key,
         model_name="llama-3.3-70b-versatile"
     )
 
-    # Load and process PDF
     pdf_file_path = "DATA.pdf"
     pdf_text = load_pdf_text(pdf_file_path)
     structured_data = structure_text(pdf_text)
 
     print(f"Structured sections extracted: {len(structured_data)}")
 
-    # Initialize embedder and FAISS index
     embedder = SentenceTransformer('all-MiniLM-L6-v2')
 
     document_keys = list(structured_data.keys())
@@ -164,6 +242,9 @@ async def startup_event():
     print(f"FAISS index built with {index.ntotal} documents.")
     print("RAG components loaded successfully!")
 
+# ============================================
+# API ENDPOINTS
+# ============================================
 @app.get("/")
 async def root():
     """Health check endpoint"""
@@ -171,23 +252,35 @@ async def root():
 
 @app.post("/chat", response_model=QueryResponse)
 async def chat(request: QueryRequest):
-    """Main chat endpoint"""
+    """Main chat endpoint with caching"""
     global llm
 
     try:
         if not request.question.strip():
             raise HTTPException(status_code=400, detail="Question cannot be empty")
 
-        # Build prompt with retrieved context and history
-        prompt = build_prompt(request.question, request.history or [], top_k=5)
+        # Check cache first (only for queries without history for consistency)
+        cache_key = get_cache_key(request.question, len(request.history or []))
+        if not request.history:
+            cached = get_cached_response(cache_key)
+            if cached:
+                print(f"Cache hit for: {request.question[:50]}...")
+                return QueryResponse(answer=cached, success=True)
 
-        # Get response from LLM
-        response = llm.invoke(prompt)
+        # Retrieve context
+        context = retrieve_context(request.question)
 
-        return QueryResponse(
-            answer=response.content,
-            success=True
-        )
+        # Build prompt
+        prompt = build_prompt(request.question, context, request.history or [])
+
+        # Get response from LLM (run in thread to not block)
+        response = await asyncio.to_thread(llm.invoke, prompt)
+
+        # Cache the response (only for queries without history)
+        if not request.history:
+            set_cached_response(cache_key, response.content)
+
+        return QueryResponse(answer=response.content, success=True)
 
     except Exception as e:
         print(f"Error: {str(e)}")
@@ -195,6 +288,64 @@ async def chat(request: QueryRequest):
             answer="Sorry, I encountered an error processing your question. Please try again!",
             success=False
         )
+
+@app.post("/chat/stream")
+async def chat_stream(request: QueryRequest):
+    """Streaming chat endpoint - returns response word by word"""
+    global llm
+
+    async def generate():
+        try:
+            if not request.question.strip():
+                yield "data: {\"error\": \"Question cannot be empty\"}\n\n"
+                return
+
+            # Check cache first
+            cache_key = get_cache_key(request.question, len(request.history or []))
+            if not request.history:
+                cached = get_cached_response(cache_key)
+                if cached:
+                    # Stream cached response
+                    words = cached.split(' ')
+                    for i, word in enumerate(words):
+                        yield f"data: {word}{' ' if i < len(words)-1 else ''}\n\n"
+                        await asyncio.sleep(0.02)  # Small delay for smooth streaming
+                    yield "data: [DONE]\n\n"
+                    return
+
+            # Retrieve context
+            context = retrieve_context(request.question)
+            prompt = build_prompt(request.question, context, request.history or [])
+
+            # Get response and stream it
+            response = await asyncio.to_thread(llm.invoke, prompt)
+            full_response = response.content
+
+            # Cache response
+            if not request.history:
+                set_cached_response(cache_key, full_response)
+
+            # Stream word by word
+            words = full_response.split(' ')
+            for i, word in enumerate(words):
+                yield f"data: {word}{' ' if i < len(words)-1 else ''}\n\n"
+                await asyncio.sleep(0.02)
+
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            print(f"Streaming error: {str(e)}")
+            yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @app.get("/health")
 async def health_check():
@@ -204,7 +355,9 @@ async def health_check():
         "embedder_loaded": embedder is not None,
         "index_loaded": index is not None,
         "llm_loaded": llm is not None,
-        "documents_count": len(document_keys)
+        "documents_count": len(document_keys),
+        "cache_size": len(query_cache),
+        "embedding_cache_size": len(embedding_cache)
     }
 
 if __name__ == "__main__":

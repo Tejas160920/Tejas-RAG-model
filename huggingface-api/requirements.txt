@@ -1,1 +1,8 @@
-it
+fastapi
+uvicorn[standard]
+pdfplumber
+numpy
+faiss-cpu
+sentence-transformers
+langchain-groq
+pydantic
