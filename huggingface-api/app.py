@@ -163,51 +163,53 @@ def build_prompt(query: str, context: str, history: List[Message] = []) -> str:
             history_str += f"{role}: {msg.content}\n"
         history_str = f"\nCONVERSATION HISTORY:\n{history_str}\n"
 
-    prompt = f"""You are Tejas's personal AI assistant embedded on his portfolio website. Your role is to help visitors learn about Tejas Gaikwad - his background, skills, projects, education, and experience.
+    prompt = f"""You are Tejas's AI assistant on his portfolio website.
 
-PERSONALITY:
-- Be friendly, professional, and conversational
-- Speak as if you know Tejas well (use "Tejas" or "he" naturally)
-- Be enthusiastic about his work and achievements
-- Keep responses concise but informative
+FORMATTING RULES (MUST FOLLOW):
+1. Start with a short intro (1 line)
+2. Use this structure for listing items:
 
-STRICT FORMATTING RULES - YOU MUST FOLLOW THESE:
-1. Start with ONE short intro sentence (max 15 words)
-2. Then use bullet points with • for EACH item on a NEW LINE
-3. Each bullet point MUST be on its own separate line
-4. NEVER write long paragraphs - ALWAYS use bullet points
-5. Add relevant emojis (🚀 for projects, 💼 for work, 🎓 for education, 💻 for skills, 📧 for contact)
-6. Keep each bullet point short and scannable
+For WORK EXPERIENCE or EDUCATION:
+**Company/School Name - Role/Degree (Date)**
+• Achievement or task 1
+• Achievement or task 2
 
-CORRECT FORMAT EXAMPLE:
-Tejas has impressive work experience! 💼
+For PROJECTS:
+**Project Name** 🚀
+• What it does
+• Technologies used
 
-• SmartLeaven Digital Systems - Software Developer Intern (July 2023 - June 2024)
-• BARC India - Research Intern (June 2023 - August 2023)
-• Built real-time detection systems and ML models
+For SKILLS:
+• Skill 1
+• Skill 2
 
-WRONG FORMAT (NEVER DO THIS):
-"Tejas worked at SmartLeaven Digital Systems as Software Developer Intern from July 2023 to June 2024 where he developed detection systems and also at BARC as Research Intern..."
+3. Each heading on its own line, each bullet on its own line
+4. Add emojis: 💼 work, 🎓 education, 🚀 projects, 💻 skills, 📧 contact
+5. Keep bullets short (under 15 words each)
+
+EXAMPLE FOR WORK EXPERIENCE:
+Tejas has great experience! 💼
+
+**SmartLeaven Digital Systems - Software Developer Intern (July 2023 - June 2024)**
+• Built real-time detection systems
+• Optimized Jetson Orin processing
+
+**BARC India - Research Intern (June 2023 - August 2023)**
+• Developed ML models for nuclear plants
+• Created data simulation tools
 
 INFORMATION ABOUT TEJAS:
 {context}
 {history_str}
-RESPONSE GUIDELINES:
-1. If the question is about Tejas and you have the information: Answer with a short intro + bullet points with emojis.
+GUIDELINES:
+- If info not available: "I don't have that specific info, but I can tell you about [related topic]"
+- Contact: tejasgaikwad16092002@gmail.com or linkedin.com/in/tejasgg
+- Unrelated questions: Politely redirect to portfolio topics
+- "Yes/tell me more": Use history to continue the topic
 
-2. If the question is about Tejas but the specific detail isn't available: Say something like "That specific information isn't in my knowledge base, but I can tell you about [related topic]. Would you like to know more about his [projects/skills/experience/education]?"
+QUESTION: {query}
 
-3. If asked about contact/hiring: Direct them to his email (tejasgaikwad16092002@gmail.com) or LinkedIn (https://www.linkedin.com/in/tejasgg)
-
-4. If asked something completely unrelated to Tejas: Politely redirect by saying "I'm Tejas's portfolio assistant, so I'm best at answering questions about him! I can tell you about his projects, skills, experience, or education. What would you like to know?"
-
-5. For greetings: Respond warmly and offer to help them learn about Tejas.
-
-6. IMPORTANT: If the user says "yes", "sure", "okay", "tell me more", etc., look at the conversation history to understand what they're referring to and provide that information. Don't ask again what they want - just give them the relevant details.
-
-CURRENT QUESTION: {query}
-
-ANSWER (remember: bullet points on separate lines, no paragraphs):"""
+ANSWER:"""
     return prompt
 
 # ============================================
@@ -250,60 +252,22 @@ async def startup_event():
     print("RAG components loaded successfully!")
 
 # ============================================
-# POST-PROCESSING - Force proper formatting
+# POST-PROCESSING - Minimal cleanup only
 # ============================================
 def format_response(text: str) -> str:
-    """Force proper formatting - balanced approach"""
+    """Minimal cleanup - let the LLM handle formatting"""
     import re
 
-    # Step 1: Fix missing spaces ONLY between lowercase and uppercase
-    # BUT preserve known compound names
-    compound_names = ['SmartLeaven', 'YouTube', 'GitHub', 'LinkedIn', 'JavaScript', 'TypeScript', 'PyTorch', 'TensorFlow']
-    placeholders = {}
-    for i, name in enumerate(compound_names):
-        placeholder = f'__COMPOUND_{i}__'
-        placeholders[placeholder] = name
-        text = text.replace(name, placeholder)
-
-    # Now fix missing spaces (e.g., "processingBhabha" -> "processing Bhabha")
-    text = re.sub(r'([a-z])([A-Z][a-z])', r'\1 \2', text)
-
-    # Restore compound names
-    for placeholder, name in placeholders.items():
-        text = text.replace(placeholder, name)
-
-    # Step 2: Add newline before company/role patterns (not emojis)
-    # Pattern: Company Name followed by role and date
-    text = re.sub(
-        r'([.!?])\s*((?:SmartLeaven|Bhabha|BARC)[^.!?]*(?:Intern|Developer|Engineer|Researcher)[^.!?]*\([^)]+\))',
-        r'\1\n\n• \2',
-        text,
-        flags=re.IGNORECASE
-    )
-
-    # Step 3: If text has multiple sentences but no bullets, add them at sentence boundaries
-    if '•' not in text and text.count('.') >= 2:
-        # Split after first sentence (intro), then bullet the rest
-        match = re.match(r'^([^.!?]+[.!?])\s*(.+)$', text, re.DOTALL)
-        if match:
-            intro = match.group(1)
-            rest = match.group(2)
-            # Split rest by sentence-ending punctuation followed by capital letter
-            sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', rest)
-            if len(sentences) >= 1:
-                bullets = '\n\n'.join(['• ' + s.strip() for s in sentences if s.strip()])
-                text = intro + '\n\n' + bullets
-
-    # Step 4: Clean up multiple newlines
+    # Just clean up multiple newlines and whitespace
     text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r' +', ' ', text)
 
-    # Step 5: Clean up lines
+    # Clean up lines
     lines = text.split('\n')
     formatted_lines = []
     for line in lines:
         line = line.strip()
-        # Skip lines that are just emojis or very short
-        if line and not (len(line) <= 2 and not line[0].isalnum()):
+        if line:
             formatted_lines.append(line)
         elif formatted_lines and formatted_lines[-1] != '':
             formatted_lines.append('')
