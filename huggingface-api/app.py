@@ -253,61 +253,62 @@ async def startup_event():
 # POST-PROCESSING - Force proper formatting
 # ============================================
 def format_response(text: str) -> str:
-    """Force proper formatting - splits by emojis and fixes spacing"""
+    """Force proper formatting - balanced approach"""
     import re
 
-    # Common emojis used by LLM for different topics
-    emoji_pattern = r'([📊🔧🔬💼🎓💻🚀📧✨🎯🏆📱⚡🔥💡🎮📝🛠️])'
+    # Step 1: Fix missing spaces ONLY between lowercase and uppercase
+    # BUT preserve known compound names
+    compound_names = ['SmartLeaven', 'YouTube', 'GitHub', 'LinkedIn', 'JavaScript', 'TypeScript', 'PyTorch', 'TensorFlow']
+    placeholders = {}
+    for i, name in enumerate(compound_names):
+        placeholder = f'__COMPOUND_{i}__'
+        placeholders[placeholder] = name
+        text = text.replace(name, placeholder)
 
-    # Step 1: Fix missing spaces (e.g., "processingBhabha" -> "processing Bhabha")
-    # Add space before capital letter that follows lowercase letter without space
-    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    # Now fix missing spaces (e.g., "processingBhabha" -> "processing Bhabha")
+    text = re.sub(r'([a-z])([A-Z][a-z])', r'\1 \2', text)
 
-    # Step 2: Add newlines before emojis (they mark new sections)
-    text = re.sub(emoji_pattern, r'\n\n• \1', text)
+    # Restore compound names
+    for placeholder, name in placeholders.items():
+        text = text.replace(placeholder, name)
 
-    # Step 3: If first character is bullet from above, remove it (don't bullet the intro)
-    text = text.strip()
-    if text.startswith('• '):
-        text = text[2:]
+    # Step 2: Add newline before company/role patterns (not emojis)
+    # Pattern: Company Name followed by role and date
+    text = re.sub(
+        r'([.!?])\s*((?:SmartLeaven|Bhabha|BARC)[^.!?]*(?:Intern|Developer|Engineer|Researcher)[^.!?]*\([^)]+\))',
+        r'\1\n\n• \2',
+        text,
+        flags=re.IGNORECASE
+    )
 
-    # Step 4: Handle existing bullet points
-    text = re.sub(r'([^\n])(\s*•)', r'\1\n\n•', text)
+    # Step 3: If text has multiple sentences but no bullets, add them at sentence boundaries
+    if '•' not in text and text.count('.') >= 2:
+        # Split after first sentence (intro), then bullet the rest
+        match = re.match(r'^([^.!?]+[.!?])\s*(.+)$', text, re.DOTALL)
+        if match:
+            intro = match.group(1)
+            rest = match.group(2)
+            # Split rest by sentence-ending punctuation followed by capital letter
+            sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', rest)
+            if len(sentences) >= 1:
+                bullets = '\n\n'.join(['• ' + s.strip() for s in sentences if s.strip()])
+                text = intro + '\n\n' + bullets
 
-    # Step 5: Also add newlines before company/org names if no emoji present
-    company_patterns = [
-        r'(SmartLeaven|Bhabha|BARC|IIT|MIT|Google|Microsoft|Amazon|Meta|Apple)',
-        r'([A-Z][a-z]+\s+(?:Digital|Systems|Technologies|Research|Atomic|Centre|Center|Institute|University))',
-    ]
-    for pattern in company_patterns:
-        text = re.sub(rf'([.!?])\s*({pattern})', r'\1\n\n• \2', text, flags=re.IGNORECASE)
-        text = re.sub(rf'([a-z])\s+({pattern})', r'\1\n\n• \2', text, flags=re.IGNORECASE)
-
-    # Step 6: Clean up multiple newlines (max 2)
+    # Step 4: Clean up multiple newlines
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    # Step 7: Clean up - ensure no double bullets
-    text = re.sub(r'•\s*•', '•', text)
-
-    # Step 8: Final line-by-line cleanup
+    # Step 5: Clean up lines
     lines = text.split('\n')
     formatted_lines = []
     for line in lines:
         line = line.strip()
-        if line:
+        # Skip lines that are just emojis or very short
+        if line and not (len(line) <= 2 and not line[0].isalnum()):
             formatted_lines.append(line)
         elif formatted_lines and formatted_lines[-1] != '':
             formatted_lines.append('')
 
-    result = '\n'.join(formatted_lines)
-
-    # Step 9: Ensure at least some formatting - if still no newlines, force split at periods
-    if '\n' not in result and result.count('.') > 2:
-        sentences = re.split(r'(?<=[.!?])\s+', result)
-        if len(sentences) > 1:
-            result = sentences[0] + '\n\n' + '\n\n'.join(['• ' + s for s in sentences[1:] if s.strip()])
-
-    return result
+    return '\n'.join(formatted_lines)
 
 # ============================================
 # API ENDPOINTS
