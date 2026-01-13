@@ -253,42 +253,43 @@ async def startup_event():
 # POST-PROCESSING - Force proper formatting
 # ============================================
 def format_response(text: str) -> str:
-    """Force proper formatting - aggressively adds bullet points and newlines"""
+    """Force proper formatting - splits by emojis and fixes spacing"""
     import re
 
-    # First, handle existing bullet points
+    # Common emojis used by LLM for different topics
+    emoji_pattern = r'([📊🔧🔬💼🎓💻🚀📧✨🎯🏆📱⚡🔥💡🎮📝🛠️])'
+
+    # Step 1: Fix missing spaces (e.g., "processingBhabha" -> "processing Bhabha")
+    # Add space before capital letter that follows lowercase letter without space
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+
+    # Step 2: Add newlines before emojis (they mark new sections)
+    text = re.sub(emoji_pattern, r'\n\n• \1', text)
+
+    # Step 3: If first character is bullet from above, remove it (don't bullet the intro)
+    text = text.strip()
+    if text.startswith('• '):
+        text = text[2:]
+
+    # Step 4: Handle existing bullet points
     text = re.sub(r'([^\n])(\s*•)', r'\1\n\n•', text)
-    text = re.sub(r'([^\n])(\s*[-*]\s)', r'\1\n\n\2', text)
 
-    # Detect company/role patterns and add newlines + bullets
-    # Pattern: "Company Name: Role" or "Company Name - Role"
-    text = re.sub(r'([.!?])\s*([A-Z][^.!?]*(?:Pvt Ltd|Ltd|Inc|LLC|Systems|Technologies|Centre|Center|Institute|University|College|BARC|IIT|MIT)[^.!?]*(?:Intern|Developer|Engineer|Researcher|Analyst|Manager|Lead)[^.!?]*[.)])', r'\1\n\n• \2', text, flags=re.IGNORECASE)
+    # Step 5: Also add newlines before company/org names if no emoji present
+    company_patterns = [
+        r'(SmartLeaven|Bhabha|BARC|IIT|MIT|Google|Microsoft|Amazon|Meta|Apple)',
+        r'([A-Z][a-z]+\s+(?:Digital|Systems|Technologies|Research|Atomic|Centre|Center|Institute|University))',
+    ]
+    for pattern in company_patterns:
+        text = re.sub(rf'([.!?])\s*({pattern})', r'\1\n\n• \2', text, flags=re.IGNORECASE)
+        text = re.sub(rf'([a-z])\s+({pattern})', r'\1\n\n• \2', text, flags=re.IGNORECASE)
 
-    # Pattern: Role at Company (Date - Date)
-    text = re.sub(r'([.!?])\s*([A-Z][^.!?]*(?:Intern|Developer|Engineer|Researcher)[^.!?]*\(\w+\s+\d{4}\s*[-–]\s*\w+\s+\d{4}\))', r'\1\n\n• \2', text, flags=re.IGNORECASE)
-
-    # Add bullet before any line starting with a company-like name after intro
-    text = re.sub(r'([.!?]\s*\n*\s*)([A-Z][A-Za-z\s]+(?:Digital|Tech|Software|Research|Atomic|Systems)[^.!?\n]{10,}[.!?])', r'\1\n• \2', text)
-
-    # If no bullets were added, try to split by common separators
-    if '•' not in text and text.count('.') > 2:
-        # Split long responses into bullet points at sentence boundaries
-        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
-        if len(sentences) > 2:
-            intro = sentences[0]
-            rest = sentences[1:]
-            text = intro + '\n\n' + '\n\n'.join(['• ' + s for s in rest if len(s) > 20])
-
-    # Clean up: ensure bullets are on new lines
-    text = re.sub(r'([^\n])(•)', r'\1\n\n\2', text)
-
-    # Clean up multiple newlines (max 2)
+    # Step 6: Clean up multiple newlines (max 2)
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    # Clean up spaces before newlines
-    text = re.sub(r' +\n', '\n', text)
+    # Step 7: Clean up - ensure no double bullets
+    text = re.sub(r'•\s*•', '•', text)
 
-    # Final cleanup
+    # Step 8: Final line-by-line cleanup
     lines = text.split('\n')
     formatted_lines = []
     for line in lines:
@@ -298,7 +299,15 @@ def format_response(text: str) -> str:
         elif formatted_lines and formatted_lines[-1] != '':
             formatted_lines.append('')
 
-    return '\n'.join(formatted_lines)
+    result = '\n'.join(formatted_lines)
+
+    # Step 9: Ensure at least some formatting - if still no newlines, force split at periods
+    if '\n' not in result and result.count('.') > 2:
+        sentences = re.split(r'(?<=[.!?])\s+', result)
+        if len(sentences) > 1:
+            result = sentences[0] + '\n\n' + '\n\n'.join(['• ' + s for s in sentences[1:] if s.strip()])
+
+    return result
 
 # ============================================
 # API ENDPOINTS
@@ -386,7 +395,7 @@ async def chat_stream(request: QueryRequest):
             if not request.history:
                 set_cached_response(cache_key, full_response)
 
-            # Stream line by line for better formatting, then word by word within lines
+            # Stream line by line for better formatting
             lines = full_response.split('\n')
             for line_idx, line in enumerate(lines):
                 if line.strip():
@@ -394,8 +403,9 @@ async def chat_stream(request: QueryRequest):
                     for i, word in enumerate(words):
                         yield f"data: {word}{' ' if i < len(words)-1 else ''}\n\n"
                         await asyncio.sleep(0.02)
+                # Send newline token (frontend will convert to actual newline)
                 if line_idx < len(lines) - 1:
-                    yield f"data: \n\n\n"  # Send newline
+                    yield f"data: [NEWLINE]\n\n"
                     await asyncio.sleep(0.01)
 
             yield "data: [DONE]\n\n"
