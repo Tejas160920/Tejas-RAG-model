@@ -1,8 +1,10 @@
 fastapi
 uvicorn[standard]
 pdfplumber
-numpy
+numpy<2.0
 faiss-cpu
-sentence-transformers
+sentence-transformers==2.2.2
 langchain-groq
 pydantic
+torch==2.1.0
+transformers==4.36.0
