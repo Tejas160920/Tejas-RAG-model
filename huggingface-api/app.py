@@ -253,17 +253,34 @@ async def startup_event():
 # POST-PROCESSING - Force proper formatting
 # ============================================
 def format_response(text: str) -> str:
-    """Force proper formatting with bullet points on separate lines"""
+    """Force proper formatting - aggressively adds bullet points and newlines"""
     import re
 
-    # Ensure bullet points start on new lines
+    # First, handle existing bullet points
     text = re.sub(r'([^\n])(\s*•)', r'\1\n\n•', text)
-
-    # Also handle other bullet styles that LLM might use
     text = re.sub(r'([^\n])(\s*[-*]\s)', r'\1\n\n\2', text)
 
-    # Ensure emojis followed by text that looks like a header get a newline after
-    text = re.sub(r'([!?.])\s*\n*\s*(•)', r'\1\n\n•', text)
+    # Detect company/role patterns and add newlines + bullets
+    # Pattern: "Company Name: Role" or "Company Name - Role"
+    text = re.sub(r'([.!?])\s*([A-Z][^.!?]*(?:Pvt Ltd|Ltd|Inc|LLC|Systems|Technologies|Centre|Center|Institute|University|College|BARC|IIT|MIT)[^.!?]*(?:Intern|Developer|Engineer|Researcher|Analyst|Manager|Lead)[^.!?]*[.)])', r'\1\n\n• \2', text, flags=re.IGNORECASE)
+
+    # Pattern: Role at Company (Date - Date)
+    text = re.sub(r'([.!?])\s*([A-Z][^.!?]*(?:Intern|Developer|Engineer|Researcher)[^.!?]*\(\w+\s+\d{4}\s*[-–]\s*\w+\s+\d{4}\))', r'\1\n\n• \2', text, flags=re.IGNORECASE)
+
+    # Add bullet before any line starting with a company-like name after intro
+    text = re.sub(r'([.!?]\s*\n*\s*)([A-Z][A-Za-z\s]+(?:Digital|Tech|Software|Research|Atomic|Systems)[^.!?\n]{10,}[.!?])', r'\1\n• \2', text)
+
+    # If no bullets were added, try to split by common separators
+    if '•' not in text and text.count('.') > 2:
+        # Split long responses into bullet points at sentence boundaries
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+        if len(sentences) > 2:
+            intro = sentences[0]
+            rest = sentences[1:]
+            text = intro + '\n\n' + '\n\n'.join(['• ' + s for s in rest if len(s) > 20])
+
+    # Clean up: ensure bullets are on new lines
+    text = re.sub(r'([^\n])(•)', r'\1\n\n\2', text)
 
     # Clean up multiple newlines (max 2)
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -271,7 +288,7 @@ def format_response(text: str) -> str:
     # Clean up spaces before newlines
     text = re.sub(r' +\n', '\n', text)
 
-    # Ensure each bullet point is on its own line
+    # Final cleanup
     lines = text.split('\n')
     formatted_lines = []
     for line in lines:
