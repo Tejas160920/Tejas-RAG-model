@@ -250,6 +250,40 @@ async def startup_event():
     print("RAG components loaded successfully!")
 
 # ============================================
+# POST-PROCESSING - Force proper formatting
+# ============================================
+def format_response(text: str) -> str:
+    """Force proper formatting with bullet points on separate lines"""
+    import re
+
+    # Ensure bullet points start on new lines
+    text = re.sub(r'([^\n])(\s*•)', r'\1\n\n•', text)
+
+    # Also handle other bullet styles that LLM might use
+    text = re.sub(r'([^\n])(\s*[-*]\s)', r'\1\n\n\2', text)
+
+    # Ensure emojis followed by text that looks like a header get a newline after
+    text = re.sub(r'([!?.])\s*\n*\s*(•)', r'\1\n\n•', text)
+
+    # Clean up multiple newlines (max 2)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # Clean up spaces before newlines
+    text = re.sub(r' +\n', '\n', text)
+
+    # Ensure each bullet point is on its own line
+    lines = text.split('\n')
+    formatted_lines = []
+    for line in lines:
+        line = line.strip()
+        if line:
+            formatted_lines.append(line)
+        elif formatted_lines and formatted_lines[-1] != '':
+            formatted_lines.append('')
+
+    return '\n'.join(formatted_lines)
+
+# ============================================
 # API ENDPOINTS
 # ============================================
 @app.get("/")
@@ -283,11 +317,14 @@ async def chat(request: QueryRequest):
         # Get response from LLM (run in thread to not block)
         response = await asyncio.to_thread(llm.invoke, prompt)
 
+        # Format the response to ensure proper bullet points
+        formatted_answer = format_response(response.content)
+
         # Cache the response (only for queries without history)
         if not request.history:
-            set_cached_response(cache_key, response.content)
+            set_cached_response(cache_key, formatted_answer)
 
-        return QueryResponse(answer=response.content, success=True)
+        return QueryResponse(answer=formatted_answer, success=True)
 
     except Exception as e:
         print(f"Error: {str(e)}")
@@ -326,19 +363,26 @@ async def chat_stream(request: QueryRequest):
 
             # Get response and stream it
             response = await asyncio.to_thread(llm.invoke, prompt)
-            full_response = response.content
+            full_response = format_response(response.content)
 
             # Cache response
             if not request.history:
                 set_cached_response(cache_key, full_response)
 
-            # Stream word by word
-            words = full_response.split(' ')
-            for i, word in enumerate(words):
-                yield f"data: {word}{' ' if i < len(words)-1 else ''}\n\n"
-                await asyncio.sleep(0.02)
+            # Stream line by line for better formatting, then word by word within lines
+            lines = full_response.split('\n')
+            for line_idx, line in enumerate(lines):
+                if line.strip():
+                    words = line.split(' ')
+                    for i, word in enumerate(words):
+                        yield f"data: {word}{' ' if i < len(words)-1 else ''}\n\n"
+                        await asyncio.sleep(0.02)
+                if line_idx < len(lines) - 1:
+                    yield f"data: \n\n\n"  # Send newline
+                    await asyncio.sleep(0.01)
 
             yield "data: [DONE]\n\n"
+            return
 
         except Exception as e:
             print(f"Streaming error: {str(e)}")
